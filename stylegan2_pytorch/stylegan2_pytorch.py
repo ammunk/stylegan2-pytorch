@@ -28,6 +28,8 @@ from linear_attention_transformer import ImageLinearAttention
 from PIL import Image
 from pathlib import Path
 
+from advas import advas_fn
+
 try:
     from apex import amp
     APEX_AVAILABLE = True
@@ -562,8 +564,8 @@ class StyleGAN2(nn.Module):
         set_requires_grad(self.GE, False)
 
         generator_params = list(self.G.parameters()) + list(self.S.parameters())
-        self.G_opt = AdamP(generator_params, lr = self.lr, betas=(0.5, 0.9))
-        self.D_opt = AdamP(self.D.parameters(), lr = self.lr * ttur_mult, betas=(0.5, 0.9))
+        self.G_opt = AdamP(generator_params, lr = self.lr, betas=(0.5, 0.99))
+        self.D_opt = AdamP(self.D.parameters(), lr = self.lr * ttur_mult, betas=(0.5, 0.99))
 
         self._init_weights()
         self.reset_parameter_averaging()

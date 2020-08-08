@@ -65,22 +65,6 @@ def train_from_folder(
     else:
         model.clear()
 
-    if generate:
-        now = datetime.now()
-        timestamp = now.strftime("%m-%d-%Y_%H-%M-%S")
-        samples_name = f'generated-{timestamp}'
-        model.evaluate(samples_name, num_image_tiles)
-        print(f'sample images generated at {results_dir}/{name}/{samples_name}')
-        return
-
-    if generate_interpolation:
-        now = datetime.now()
-        timestamp = now.strftime("%m-%d-%Y_%H-%M-%S")
-        samples_name = f'generated-{timestamp}'
-        model.generate_interpolation(samples_name, num_image_tiles, save_frames = save_frames)
-        print(f'interpolation generated at {results_dir}/{name}/{samples_name}')
-        return
-
     model.set_data_src(data)
 
     for _ in tqdm(range(num_train_steps - model.steps), mininterval=10., desc=f'{name}<{data}>'):
