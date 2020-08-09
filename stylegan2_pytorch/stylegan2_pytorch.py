@@ -21,6 +21,7 @@ from torch.autograd import grad as torch_grad
 
 import torchvision
 from torchvision import transforms
+from torchvision import datasets
 
 from vector_quantize_pytorch import VectorQuantize
 from linear_attention_transformer import ImageLinearAttention
@@ -682,8 +683,8 @@ class Trainer():
     def config(self):
         return {'image_size': self.image_size, 'network_capacity': self.network_capacity, 'transparent': self.transparent, 'fq_layers': self.fq_layers, 'fq_dict_size': self.fq_dict_size, 'attn_layers': self.attn_layers, 'no_const': self.no_const}
 
-    def set_data_src(self, folder):
-        self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
+    def set_data_src(self, dataset):
+        self.dataset = dataset
         self.loader = cycle(data.DataLoader(self.dataset, num_workers = default(self.num_workers, num_cores), batch_size = self.batch_size, drop_last = True, shuffle=True, pin_memory=True))
 
     def train(self):
