@@ -604,7 +604,7 @@ class StyleGAN2(nn.Module):
         return x
 
 class Trainer():
-    def __init__(self, name, results_dir, models_dir, image_size, network_capacity, transparent = False, batch_size = 4, mixed_prob = 0.9, gradient_accumulate_every=1, lr = 2e-4, ttur_mult = 2, num_workers = None, save_every = 1000, trunc_psi = 0.6, fp16 = False, cl_reg = False, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, aug_prob = 0., dataset_aug_prob = 0., *args, **kwargs):
+    def __init__(self, name, results_dir, models_dir, image_size, network_capacity, reg_strength, include_reg, transparent = False, batch_size = 4, mixed_prob = 0.9, gradient_accumulate_every=1, lr = 2e-4, ttur_mult = 2, num_workers = None, save_every = 1000, trunc_psi = 0.6, fp16 = False, cl_reg = False, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, aug_prob = 0., dataset_aug_prob = 0.,  *args, **kwargs):
         self.GAN_params = [args, kwargs]
         self.GAN = None
 
@@ -623,6 +623,9 @@ class Trainer():
         self.attn_layers = cast_list(attn_layers)
         self.no_const = no_const
         self.aug_prob = aug_prob
+
+        self.reg_strength = reg_strength
+        self.include_reg = include_reg
 
         self.lr = lr
         self.ttur_mult = ttur_mult
@@ -699,7 +702,7 @@ class Trainer():
         latent_dim = self.GAN.G.latent_dim
         num_layers = self.GAN.G.num_layers
 
-        aug_prob   = self.aug_prob
+        aug_prob  = self.aug_prob
 
         apply_gradient_penalty = self.steps % 4 == 0
         apply_path_penalty = self.steps > 5000 and self.steps % 32 == 0
@@ -754,6 +757,7 @@ class Trainer():
 
             divergence = (F.relu(1 + real_output) + F.relu(1 - fake_output)).mean()
             disc_loss = divergence
+            disc_reg = torch.tensor(0.)
 
             quantize_loss = (fake_q_loss + real_q_loss).mean()
             self.q_loss = float(quantize_loss.detach().item())
@@ -763,10 +767,14 @@ class Trainer():
             if apply_gradient_penalty:
                 gp = gradient_penalty(image_batch, real_output)
                 self.last_gp_loss = gp.clone().detach().item()
-                disc_loss = disc_loss + gp
+                disc_reg = disc_reg + gp
+                # disc_loss = disc_loss + gp TODO change disc_loss to reg_term
 
             disc_loss = disc_loss / self.gradient_accumulate_every
             disc_loss.register_hook(raise_if_nan)
+            advas_loss = advas_fn(self.reg_strength, self.GAN.D.parameters(),
+                                  disc_loss, disc_reg if self.include_reg else None)
+            disc_loss = disc_loss + advas_loss
             backwards(disc_loss, self.GAN.D_opt, 1)
 
             total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
