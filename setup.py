@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-  name = 'stylegan2_pytorch',
+  name = 'stylegan2_pytorch_package',
   packages = find_packages(),
   scripts=['bin/stylegan2_pytorch'],
   version = '0.18.3',
