@@ -363,7 +363,7 @@ class GeneratorBlock(nn.Module):
         self.to_style1 = nn.Linear(latent_dim, input_channels)
         self.to_noise1 = nn.Linear(1, filters)
         self.conv1 = Conv2DMod(input_channels, filters, 3)
-        
+
         self.to_style2 = nn.Linear(latent_dim, filters)
         self.to_noise2 = nn.Linear(1, filters)
         self.conv2 = Conv2DMod(filters, filters, 3)
@@ -683,6 +683,49 @@ class Trainer():
         self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
         self.loader = cycle(data.DataLoader(self.dataset, num_workers = default(self.num_workers, num_cores), batch_size = self.batch_size, drop_last = True, shuffle=True, pin_memory=True))
 
+    def discriminator_loss(self, apply_path_penalty, apply_gradient_penalty):
+
+        batch_size = self.batch_size
+        image_size = self.GAN.G.image_size
+        latent_dim = self.GAN.G.latent_dim
+        num_layers = self.GAN.G.num_layers
+        aug_prob   = self.aug_prob
+
+        self.GAN.D_opt.zero_grad()
+
+        for i in range(self.gradient_accumulate_every):
+            get_latents_fn = mixed_list if random() < self.mixed_prob else noise_list
+            style = get_latents_fn(batch_size, num_layers, latent_dim)
+            noise = image_noise(batch_size, image_size)
+
+            w_space = latent_to_w(self.GAN.S, style)
+            w_styles = styles_def_to_tensor(w_space)
+
+            generated_images = self.GAN.G(w_styles, noise)
+            fake_output, fake_q_loss = self.GAN.D_aug(generated_images.clone().detach(),
+                                                      detach = True, prob = aug_prob)
+
+            image_batch = next(self.loader).cuda()
+            image_batch.requires_grad_()
+            real_output, real_q_loss = self.GAN.D_aug(image_batch, prob = aug_prob)
+
+            divergence = (F.relu(1 + real_output) + F.relu(1 - fake_output)).mean()
+            disc_loss = divergence
+
+            quantize_loss = (fake_q_loss + real_q_loss).mean()
+            self.q_loss = float(quantize_loss.detach().item())
+
+            disc_loss = disc_loss + quantize_loss
+
+            if apply_gradient_penalty:
+                gp = gradient_penalty(image_batch, real_output)
+                self.last_gp_loss = gp.clone().detach().item()
+                disc_loss = disc_loss + gp
+
+            disc_loss = disc_loss / self.gradient_accumulate_every
+            disc_loss.register_hook(raise_if_nan)
+            return disc_loss, divergence
+
     def train(self):
         assert self.loader is not None, 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
 
@@ -700,7 +743,7 @@ class Trainer():
         num_layers = self.GAN.G.num_layers
 
         aug_prob   = self.aug_prob
-
+        avg_pl_length = self.pl_mean
         apply_gradient_penalty = self.steps % 4 == 0
         apply_path_penalty = self.steps > 5000 and self.steps % 32 == 0
         apply_cl_reg_to_generated = self.steps > 20000
@@ -732,45 +775,11 @@ class Trainer():
 
             self.GAN.D_opt.step()
 
-        # train discriminator
-
-        avg_pl_length = self.pl_mean
-        self.GAN.D_opt.zero_grad()
-
-        for i in range(self.gradient_accumulate_every):
-            get_latents_fn = mixed_list if random() < self.mixed_prob else noise_list
-            style = get_latents_fn(batch_size, num_layers, latent_dim)
-            noise = image_noise(batch_size, image_size)
-
-            w_space = latent_to_w(self.GAN.S, style)
-            w_styles = styles_def_to_tensor(w_space)
-
-            generated_images = self.GAN.G(w_styles, noise)
-            fake_output, fake_q_loss = self.GAN.D_aug(generated_images.clone().detach(), detach = True, prob = aug_prob)
-
-            image_batch = next(self.loader).cuda()
-            image_batch.requires_grad_()
-            real_output, real_q_loss = self.GAN.D_aug(image_batch, prob = aug_prob)
-
-            divergence = (F.relu(1 + real_output) + F.relu(1 - fake_output)).mean()
-            disc_loss = divergence
-
-            quantize_loss = (fake_q_loss + real_q_loss).mean()
-            self.q_loss = float(quantize_loss.detach().item())
-
-            disc_loss = disc_loss + quantize_loss
-
-            if apply_gradient_penalty:
-                gp = gradient_penalty(image_batch, real_output)
-                self.last_gp_loss = gp.clone().detach().item()
-                disc_loss = disc_loss + gp
-
-            disc_loss = disc_loss / self.gradient_accumulate_every
-            disc_loss.register_hook(raise_if_nan)
-            backwards(disc_loss, self.GAN.D_opt, 1)
-
-            total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
-
+        disc_loss, divergence = self.discrimiator_loss(
+            apply_gradient_penalty=apply_gradient_penalty,
+            apply_path_penalty=apply_path_penalty)
+        backwards(disc_loss, self.GAN.D_opt, 1)
+        total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
         self.d_loss = float(total_disc_loss)
         self.GAN.D_opt.step()
 
@@ -843,7 +852,7 @@ class Trainer():
         self.GAN.eval()
         ext = 'jpg' if not self.transparent else 'png'
         num_rows = num_image_tiles
-    
+
         latent_dim = self.GAN.G.latent_dim
         image_size = self.GAN.G.image_size
         num_layers = self.GAN.G.num_layers
@@ -857,7 +866,7 @@ class Trainer():
 
         generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
-        
+
         # moving averages
 
         generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
@@ -892,7 +901,7 @@ class Trainer():
             samples = evaluate_in_chunks(self.batch_size, S, z).cpu().numpy()
             self.av = np.mean(samples, axis = 0)
             self.av = np.expand_dims(self.av, axis = 0)
-            
+
         w_space = []
         for tensor, num_layers in style:
             tmp = S(tensor)
