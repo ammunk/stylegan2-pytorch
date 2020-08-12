@@ -740,6 +740,7 @@ class Trainer():
 
         avg_pl_length = self.pl_mean
         self.GAN.D_opt.zero_grad()
+        advas_loss = 0
 
         for i in range(self.gradient_accumulate_every):
             get_latents_fn = mixed_list if random() < self.mixed_prob else noise_list
@@ -773,10 +774,10 @@ class Trainer():
 
             disc_loss = disc_loss / self.gradient_accumulate_every
             disc_loss.register_hook(raise_if_nan)
-            advas_loss = advas_fn(self.reg_strength, self.GAN.D.parameters(),
-                                  disc_loss, disc_reg if self.include_reg else None)
-            disc_loss = disc_loss + advas_loss
-            backwards(disc_loss, self.GAN.D_opt, 1)
+            advas_loss = advas_loss + advas_fn(self.reg_strength, self.GAN.D.parameters(),
+                                               disc_loss, disc_reg if self.include_reg else None)
+            disc_loss = disc_loss
+            backwards(disc_loss, self.GAN.D_opt, 1, retain_graph=True)  # retain graph here so that we can differnetiate advas_loss
 
             total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
 
@@ -786,6 +787,7 @@ class Trainer():
         # train generator
 
         self.GAN.G_opt.zero_grad()
+        backwards(advas_loss, self.GAN.G_opt, 3)   # now apply advas_loss
         for i in range(self.gradient_accumulate_every):
             style = get_latents_fn(batch_size, num_layers, latent_dim)
             noise = image_noise(batch_size, image_size)
@@ -846,6 +848,40 @@ class Trainer():
 
         self.steps += 1
         self.av = None
+
+    @torch.no_grad()
+    def get_samples(self, num = 0, trunc = 1.0, n_samples=None, types=['normal', 'ema']):
+        """
+        n_samples = None means return 1 with no batch dimension
+        """
+
+        self.GAN.eval()
+        ext = 'jpg' if not self.transparent else 'png'
+    
+        latent_dim = self.GAN.G.latent_dim
+        image_size = self.GAN.G.image_size
+        num_layers = self.GAN.G.num_layers
+
+        # latents and noise
+
+        latents = noise_list(1 if n_samples is None else n_samples, num_layers, latent_dim)
+        n = image_noise(1 if n_samples is None else n_samples, image_size)
+
+        generators = {'normal': (self.GAN.S, self.GAN.G,),
+                      'ema': (self.GAN.SE, self.GAN.GE)}
+        results = []
+        for gen_type in types:
+            gs = generators[gen_type]
+            images = self.generate_truncated(*gs, latents, n, trunc_psi = self.trunc_psi)
+            if n_samples is None:
+                images = images[0]
+            results.append(images)
+
+        if len(results) > 1:
+            return tuple(results)
+        else:
+            return results[0]
+
 
     @torch.no_grad()
     def evaluate(self, num = 0, num_image_tiles = 8, trunc = 1.0):
