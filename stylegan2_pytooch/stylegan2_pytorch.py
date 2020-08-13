@@ -29,7 +29,7 @@ from linear_attention_transformer import ImageLinearAttention
 from PIL import Image
 from pathlib import Path
 
-from advas import advas_fn
+from advas import AdversarysAssistant
 
 try:
     from apex import amp
@@ -605,7 +605,7 @@ class StyleGAN2(nn.Module):
         return x
 
 class Trainer():
-    def __init__(self, name, results_dir, models_dir, image_size, network_capacity, reg_strength, include_reg, transparent = False, batch_size = 4, mixed_prob = 0.9, gradient_accumulate_every=1, lr = 2e-4, ttur_mult = 2, num_workers = None, save_every = 1000, trunc_psi = 0.6, fp16 = False, cl_reg = False, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, aug_prob = 0., dataset_aug_prob = 0.,  *args, **kwargs):
+    def __init__(self, name, results_dir, models_dir, image_size, network_capacity, reg_strength, include_reg, sparse_gp_for_regularisation, transparent = False, batch_size = 4, mixed_prob = 0.9, gradient_accumulate_every=1, lr = 2e-4, ttur_mult = 2, num_workers = None, save_every = 1000, trunc_psi = 0.6, fp16 = False, cl_reg = False, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, aug_prob = 0., dataset_aug_prob = 0.,  *args, **kwargs):
         self.GAN_params = [args, kwargs]
         self.GAN = None
 
@@ -627,6 +627,7 @@ class Trainer():
 
         self.reg_strength = reg_strength
         self.include_reg = include_reg
+        self.sparse_gp_for_regularisation = sparse_gp_for_regularisation
 
         self.lr = lr
         self.ttur_mult = ttur_mult
@@ -685,7 +686,10 @@ class Trainer():
 
     def set_data_src(self, dataset):
         self.dataset = dataset
-        self.loader = cycle(data.DataLoader(self.dataset, num_workers = default(self.num_workers, num_cores), batch_size = self.batch_size, drop_last = True, shuffle=True, pin_memory=True))
+        def make_loader():
+            return cycle(data.DataLoader(self.dataset, num_workers = default(self.num_workers, num_cores), batch_size = self.batch_size, drop_last = True, shuffle=True, pin_memory=True))
+        self.loader = make_loader()
+        self.advas_loader = make_loader()
 
     def train(self):
         assert self.loader is not None, 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
@@ -740,7 +744,6 @@ class Trainer():
 
         avg_pl_length = self.pl_mean
         self.GAN.D_opt.zero_grad()
-        advas_loss = 0
 
         for i in range(self.gradient_accumulate_every):
             get_latents_fn = mixed_list if random() < self.mixed_prob else noise_list
@@ -774,10 +777,10 @@ class Trainer():
 
             disc_loss = disc_loss / self.gradient_accumulate_every
             disc_loss.register_hook(raise_if_nan)
-            advas_loss = advas_loss + advas_fn(self.reg_strength, self.GAN.D.parameters(),
-                                               disc_loss, disc_reg if self.include_reg else None)
+            # advas_loss = advas_loss + advas_fn(self.reg_strength, self.GAN.D.parameters(),
+            #                                   disc_loss, disc_reg if self.include_reg else None)
             disc_loss = disc_loss
-            backwards(disc_loss, self.GAN.D_opt, 1, retain_graph=True)  # retain graph here so that we can differnetiate advas_loss
+            backwards(disc_loss, self.GAN.D_opt, 1)
 
             total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
 
@@ -786,8 +789,10 @@ class Trainer():
 
         # train generator
 
+        adv = AdversarysAssistant(self.reg_strength)
+
         self.GAN.G_opt.zero_grad()
-        backwards(advas_loss, self.GAN.G_opt, 3)   # now apply advas_loss
+        # backwards(advas_loss, self.GAN.G_opt, 3)   # now apply advas_loss
         for i in range(self.gradient_accumulate_every):
             style = get_latents_fn(batch_size, num_layers, latent_dim)
             noise = image_noise(batch_size, image_size)
@@ -811,8 +816,29 @@ class Trainer():
 
             gen_loss = gen_loss / self.gradient_accumulate_every
             gen_loss.register_hook(raise_if_nan)
-            backwards(gen_loss, self.GAN.G_opt, 2)
 
+            # our regulariser stuff ----------------------------------------------------
+            if self.reg_strength != 0:
+                image_batch = next(self.advas_loader).cuda()
+                real_data_output, _ = self.GAN.D_aug(image_batch, prob=aug_prob)
+                proxy_loss = (F.relu(1 + real_data_output) + F.relu(1 - fake_output)).mean()
+                proxy_loss_reg = 0
+                do_gp = apply_gradient_penalty or self.sparse_gp_for_regularisation
+                if do_gp:
+                    gp = gradient_penalty(image_batch, real_data_output)
+                    if not self.sparse_gp_for_regularisation:
+                        gp = 0.25 * gp
+                    proxy_loss_reg = proxy_loss_reg + gp
+                adv.regularize(self.GAN.D.parameters(), proxy_loss, proxy_loss_reg)
+                gen_loss = gen_loss
+
+            if i == self.gradient_accumulate_every - 1:
+                # actually add regulariser
+                gen_loss = gen_loss + adv.aggregate_grads()
+
+            # --------------------------------------------------------------------------
+
+            backwards(gen_loss, self.GAN.G_opt, 2)
             total_gen_loss += loss.detach().item() / self.gradient_accumulate_every
 
         self.g_loss = float(total_gen_loss)
