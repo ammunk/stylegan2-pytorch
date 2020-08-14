@@ -820,6 +820,7 @@ class Trainer():
             # our regulariser stuff ----------------------------------------------------
             if self.reg_strength != 0:
                 image_batch = next(self.advas_loader).cuda()
+                image_batch.requires_grad_()
                 real_data_output, _ = self.GAN.D_aug(image_batch, prob=aug_prob)
                 proxy_loss = (F.relu(1 + real_data_output) + F.relu(1 - fake_output)).mean()
                 proxy_loss_reg = 0
@@ -832,9 +833,9 @@ class Trainer():
                 adv.regularize(self.GAN.D.parameters(), proxy_loss, proxy_loss_reg)
                 gen_loss = gen_loss
 
-            if i == self.gradient_accumulate_every - 1:
-                # actually add regulariser
-                gen_loss = gen_loss + adv.aggregate_grads()
+                if i == self.gradient_accumulate_every - 1:
+                    # actually add regulariser
+                    gen_loss = gen_loss + adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
 
             # --------------------------------------------------------------------------
 
