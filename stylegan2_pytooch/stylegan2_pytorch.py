@@ -762,7 +762,6 @@ class Trainer():
 
             divergence = (F.relu(1 + real_output) + F.relu(1 - fake_output)).mean()
             disc_loss = divergence
-            disc_reg = torch.tensor(0.)
 
             quantize_loss = (fake_q_loss + real_q_loss).mean()
             self.q_loss = float(quantize_loss.detach().item())
@@ -772,8 +771,7 @@ class Trainer():
             if apply_gradient_penalty:
                 gp = gradient_penalty(image_batch, real_output)
                 self.last_gp_loss = gp.clone().detach().item()
-                disc_reg = disc_reg + gp
-                # disc_loss = disc_loss + gp TODO change disc_loss to reg_term
+                disc_loss = disc_loss + gp
 
             disc_loss = disc_loss / self.gradient_accumulate_every
             disc_loss.register_hook(raise_if_nan)
