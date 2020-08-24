@@ -820,7 +820,7 @@ class Trainer():
                 image_batch = next(self.advas_loader).cuda()
                 image_batch.requires_grad_()
                 real_data_output, _ = self.GAN.D_aug(image_batch, prob=aug_prob)
-                proxy_loss = (F.relu(1 + real_data_output) + F.relu(1 - fake_output)).mean()
+                proxy_loss = (real_data_output - fake_output).mean()  # (F.relu(1 + real_data_output) + F.relu(1 - fake_output)).mean()
                 proxy_loss_reg = 0
                 do_gp = apply_gradient_penalty or self.sparse_gp_for_regularisation
                 if do_gp:
@@ -828,12 +828,16 @@ class Trainer():
                     if not self.sparse_gp_for_regularisation:
                         gp = 0.25 * gp
                     proxy_loss_reg = proxy_loss_reg + gp
-                adv.regularize(self.GAN.D.parameters(), proxy_loss, proxy_loss_reg)
+                adv.regularize(self.GAN.D.parameters(), 
+                        proxy_loss * image_batch.size(0),
+                        proxy_loss_reg * image_batch.size(0))
                 gen_loss = gen_loss
 
                 if i == self.gradient_accumulate_every - 1:
                     # actually add regulariser
-                    gen_loss = gen_loss + adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
+                    regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
+                    gen_loss = gen_loss + regulariser
+                    self.prev_regulariser = regulariser.detach().item()
 
             # --------------------------------------------------------------------------
 
