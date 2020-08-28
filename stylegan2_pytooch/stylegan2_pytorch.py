@@ -666,21 +666,6 @@ class Trainer():
         args, kwargs = self.GAN_params
         self.GAN = StyleGAN2(lr = self.lr, ttur_mult = self.ttur_mult, image_size = self.image_size, network_capacity = self.network_capacity, transparent = self.transparent, fq_layers = self.fq_layers, fq_dict_size = self.fq_dict_size, attn_layers = self.attn_layers, fp16 = self.fp16, cl_reg = self.cl_reg, no_const = self.no_const, *args, **kwargs)
 
-    def write_config(self):
-        self.config_path.write_text(json.dumps(self.config()))
-
-    def load_config(self):
-        config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
-        self.image_size = config['image_size']
-        self.network_capacity = config['network_capacity']
-        self.transparent = config['transparent']
-        self.fq_layers = config['fq_layers']
-        self.fq_dict_size = config['fq_dict_size']
-        self.attn_layers = config.pop('attn_layers', [])
-        self.no_const = config.pop('no_const', False)
-        del self.GAN
-        self.init_GAN()
-
     def config(self):
         return {'image_size': self.image_size, 'network_capacity': self.network_capacity, 'transparent': self.transparent, 'fq_layers': self.fq_layers, 'fq_dict_size': self.fq_dict_size, 'attn_layers': self.attn_layers, 'no_const': self.no_const}
 
@@ -832,6 +817,7 @@ class Trainer():
                         proxy_loss * image_batch.size(0),
                         proxy_loss_reg * image_batch.size(0))
 
+            assert self.gradient_accumulate_every == 1, 'The below seems wrong if accumulating grads'
             if self.reg_strength > 0:
                 # actually add regulariser
                 regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
@@ -869,17 +855,17 @@ class Trainer():
 
         # save from NaN errors
 
-        checkpoint_num = floor(self.steps / self.save_every)
-
-        if any(torch.isnan(l) for l in (total_gen_loss, total_disc_loss)):
-            print(f'NaN detected for generator or discriminator. Loading from checkpoint #{checkpoint_num}')
-            self.load(checkpoint_num)
-            raise NanException
+#        checkpoint_num = floor(self.steps / self.save_every)  NOTE i hope this isn't necessary...
+#
+        #if any(torch.isnan(l) for l in (total_gen_loss, total_disc_loss)):
+        #    print(f'NaN detected for generator or discriminator. Loading from checkpoint #{checkpoint_num}')
+        #    self.load(checkpoint_num)
+        #    raise NanException
 
         # periodically save results
 
-        if self.steps % self.save_every == 0:
-            self.save(checkpoint_num)
+        #if self.steps % self.save_every == 0:
+        #    self.save(checkpoint_num)
 
         if self.steps % 1000 == 0 or (self.steps % 100 == 0 and self.steps < 2500):
             self.evaluate(floor(self.steps / 1000))
@@ -888,38 +874,41 @@ class Trainer():
         self.av = None
 
     @torch.no_grad()
-    def get_samples(self, num = 0, trunc = 1.0, n_samples=None, types=['normal', 'ema']):
-        """
-        n_samples = None means return 1 with no batch dimension
-        """
-
-        self.GAN.eval()
-        ext = 'jpg' if not self.transparent else 'png'
-    
+    def sample_same_latents(self, n_samples):
         latent_dim = self.GAN.G.latent_dim
         image_size = self.GAN.G.image_size
         num_layers = self.GAN.G.num_layers
 
-        # latents and noise
+        name = f'./latents_{n_samples}_{latent_dim}_{image_size}_{num_layers}.pt'
+        if not os.path.exists(name):
+            print('Generating new latent parameters.')
+            latents, n = self.sample_new_latents(n_samples)
+            torch.save({'latents': latents, 'n': n}, name)
+        
+        d = torch.load(name)
+        return d['latents'], d['n']
 
+    def sample_new_latents(self, n_samples):
+        latent_dim = self.GAN.G.latent_dim
+        image_size = self.GAN.G.image_size
+        num_layers = self.GAN.G.num_layers
         latents = noise_list(1 if n_samples is None else n_samples, num_layers, latent_dim)
         n = image_noise(1 if n_samples is None else n_samples, image_size)
+        return latents, n
 
-        generators = {'normal': (self.GAN.S, self.GAN.G,),
-                      'ema': (self.GAN.SE, self.GAN.GE)}
-        results = []
-        for gen_type in types:
-            gs = generators[gen_type]
-            images = self.generate_truncated(*gs, latents, n, trunc_psi = self.trunc_psi)
-            if n_samples is None:
-                images = images[0]
-            results.append(images)
-
-        if len(results) > 1:
-            return tuple(results)
+    @torch.no_grad()
+    def get_samples(self, n_samples, gen_type, do_same=True):  # s=['normal', 'ema']):
+        """
+        n_samples = None means return 1 with no batch dimension
+        """
+        self.GAN.eval()
+        if do_same:
+            latents, n = self.sample_same_latents(n_samples)
         else:
-            return results[0]
-
+            latents, n = self.sample_new_latents(n_samples)
+        gs = {'normal': (self.GAN.S, self.GAN.G,),
+              'ema': (self.GAN.SE, self.GAN.GE)}[gen_type]
+        return self.generate_truncated(*gs, latents, n, trunc_psi = self.trunc_psi)
 
     @torch.no_grad()
     def evaluate(self, num = 0, num_image_tiles = 8, trunc = 1.0):
@@ -1039,36 +1028,21 @@ class Trainer():
         rmtree(str(self.config_path), True)
         self.init_folders()
 
-    def save(self, num):
-        save_data = {'GAN': self.GAN.state_dict()}
-
+    def get_state_dict(self):
+        print('\n Getting state dict. \n')
+        save_data = {'GAN': self.GAN.state_dict(),
+                     'G_opt': self.GAN.G_opt.state_dict(),
+                     'D_opt': self.GAN.D_opt.state_dict()}
         if self.GAN.fp16:
             save_data['amp'] = amp.state_dict()
+        return save_data
 
-        torch.save(save_data, self.model_name(num))
-        self.write_config()
-
-    def load(self, num = -1):
-        self.load_config()
-
-        name = num
-        if num == -1:
-            file_paths = [p for p in Path(self.models_dir / self.name).glob('model_*.pt')]
-            saved_nums = sorted(map(lambda x: int(x.stem.split('_')[1]), file_paths))
-            if len(saved_nums) == 0:
-                return
-            name = saved_nums[-1]
-            print(f'continuing from previous epoch - {name}')
-
-        self.steps = name * self.save_every
-
-        load_data = torch.load(self.model_name(name))
-
-        # make backwards compatible
-        if 'GAN' not in load_data:
-            load_data = {'GAN': load_data}
-
+    def load_state_dict(self, state_dict):
+        print('\n Loading state dict. \n')
+        load_data = state_dict
         self.GAN.load_state_dict(load_data['GAN'])
+        self.GAN.G_opt.load_state_dict(load_data['G_opt'])
+        self.GAN.D_opt.load_state_dict(load_data['D_opt'])
 
         if self.GAN.fp16 and 'amp' in load_data:
             amp.load_state_dict(load_data['amp'])
