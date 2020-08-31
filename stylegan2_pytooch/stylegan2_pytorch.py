@@ -772,7 +772,7 @@ class Trainer():
 
         # train generator
 
-        adv = AdversarysAssistant(self.reg_strength if self.reg_strength != -1 else 1)
+        adv = AdversarysAssistant(1 if self.reg_strength < 0 else self.reg_strength)
 
         self.GAN.G_opt.zero_grad()
         # backwards(advas_loss, self.GAN.G_opt, 3)   # now apply advas_loss
@@ -824,10 +824,14 @@ class Trainer():
                 gen_loss = gen_loss + regulariser
                 self.prev_regulariser = regulariser.detach().item()
                 backwards(gen_loss, self.GAN.G_opt, 2)
-            elif self.reg_strength == -1:
+            elif self.reg_strength in [-1, -2]:
                 regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
                 gen_params = list(self.GAN.G.parameters()) + list(self.GAN.S.parameters())
-                adv.normalized_backward(gen_params, gen_loss, regulariser, retain_first_graph=True)
+                if self.reg_strength == -1:
+                    adv.normalized_backward(gen_params, gen_loss, regulariser, retain_first_graph=True)
+                else:
+                    assert self.reg_strength == -2
+                    adv.normalized_advas_backward(gen_params, gen_loss, regulariser, retain_first_graph=True)
                 self.prev_regulariser = regulariser.detach().item()
             else:
                 assert self.reg_strength == 0
