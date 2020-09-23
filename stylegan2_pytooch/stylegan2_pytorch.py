@@ -838,6 +838,11 @@ class Trainer():
                 self.prev_regulariser = 0.
                 backwards(gen_loss, self.GAN.G_opt, 2)
 
+            if self.reg_strength != 0:
+                self.reg_normalizer = adv.normalizer
+            else:
+                self.reg_normalizer = 0.
+
 
             # --------------------------------------------------------------------------
 
