@@ -817,7 +817,6 @@ class Trainer():
                         proxy_loss * image_batch.size(0),
                         proxy_loss_reg * image_batch.size(0))
 
-            assert self.gradient_accumulate_every == 1, 'The below seems wrong if accumulating grads'
             if self.reg_strength > 0:
                 # actually add regulariser
                 regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
