@@ -775,6 +775,7 @@ class Trainer():
         adv = AdversarysAssistant(1 if self.reg_strength < 0 else self.reg_strength)
 
         self.GAN.G_opt.zero_grad()
+        self.prev_regulariser = 0
         # backwards(advas_loss, self.GAN.G_opt, 3)   # now apply advas_loss
         for i in range(self.gradient_accumulate_every):
             style = get_latents_fn(batch_size, num_layers, latent_dim)
@@ -821,31 +822,30 @@ class Trainer():
                 # actually add regulariser
                 regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
                 gen_loss = gen_loss + regulariser
-                self.prev_regulariser = regulariser.detach().item()
+                self.prev_regulariser += regulariser.detach().item()
                 backwards(gen_loss, self.GAN.G_opt, 2)
-            elif self.reg_strength in [-1, -2]:
-                regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
-                gen_params = list(self.GAN.G.parameters()) + list(self.GAN.S.parameters())
-                if self.reg_strength == -1:
-                    adv.normalized_backward(gen_params, gen_loss, regulariser, retain_first_graph=True)
-                else:
-                    assert self.reg_strength == -2
-                    adv.normalized_advas_backward(gen_params, gen_loss, regulariser, retain_first_graph=True)
-                self.prev_regulariser = regulariser.detach().item()
-            else:
+            elif self.reg_strength == 0:
                 assert self.reg_strength == 0
                 self.prev_regulariser = 0.
                 backwards(gen_loss, self.GAN.G_opt, 2)
 
-            if self.reg_strength != 0:
-                self.reg_normalizer = adv.normalizer
-            else:
-                self.reg_normalizer = 0.
-
-
             # --------------------------------------------------------------------------
 
             total_gen_loss += loss.detach().item() / self.gradient_accumulate_every
+
+        if self.reg_strength in [-1, -2]:
+            regulariser = adv.aggregate_grads(batch_size*self.gradient_accumulate_every)
+            gen_params = list(self.GAN.G.parameters()) + list(self.GAN.S.parameters())
+            if self.reg_strength == -1:
+                adv.normalized_backward(gen_params, gen_loss, regulariser, retain_first_graph=True)
+            else:
+                assert self.reg_strength == -2
+                adv.normalized_advas_backward(gen_params, gen_loss, regulariser,
+                                              retain_first_graph=True)
+            self.prev_regulariser = regulariser.detach().item()
+            self.reg_normalizer = adv.normalizer
+        else:
+            self.reg_normalizer = 0.
 
         self.g_loss = float(total_gen_loss)
         self.GAN.G_opt.step()
