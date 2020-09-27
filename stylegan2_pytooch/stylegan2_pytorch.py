@@ -17,6 +17,7 @@ from torch.utils import data
 import torch.nn.functional as F
 
 from adamp import AdamP
+from torch.optim import RMSprop
 from torch.autograd import grad as torch_grad
 
 import torchvision
@@ -537,7 +538,7 @@ class Discriminator(nn.Module):
         return x.squeeze(), quantize_loss
 
 class StyleGAN2(nn.Module):
-    def __init__(self, image_size, latent_dim = 512, fmap_max = 512, style_depth = 8, network_capacity = 16, transparent = False, fp16 = False, cl_reg = False, steps = 1, lr = 1e-4, ttur_mult = 2, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False):
+    def __init__(self, image_size, latent_dim = 512, fmap_max = 512, style_depth = 8, network_capacity = 16, transparent = False, fp16 = False, cl_reg = False, steps = 1, lr = 1e-4, ttur_mult = 2, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, optim_type='adam'):
         super().__init__()
         self.lr = lr
         # self.steps = steps
@@ -565,8 +566,12 @@ class StyleGAN2(nn.Module):
         set_requires_grad(self.GE, False)
 
         generator_params = list(self.G.parameters()) + list(self.S.parameters())
-        self.G_opt = AdamP(generator_params, lr = self.lr, betas=(0.5, 0.99))
-        self.D_opt = AdamP(self.D.parameters(), lr = self.lr * ttur_mult, betas=(0.5, 0.99))
+        if optim_type == 'adam':
+            self.G_opt = AdamP(generator_params, lr = self.lr, betas=(0.5, 0.99))
+            self.D_opt = AdamP(self.D.parameters(), lr = self.lr * ttur_mult, betas=(0.5, 0.99))
+        elif optim_type == 'rmsprop':
+            self.G_opt = RMSprop(generator_params, lr = self.lr)
+            self.D_opt = RMSprop(self.D.parameters(), lr = self.lr * ttur_mult)
 
         self._init_weights()
         self.reset_parameter_averaging()
